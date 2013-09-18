@@ -1,0 +1,332 @@
+#!/bin/sh
+#
+#
+#	MooseFS OCF RA. Control moosefs master agent.
+#       Used Dummy agent as template
+# Copyright (c) 2013 Juan Carlos Fernandez
+#                    All Rights Reserved.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of version 2 of the GNU General Public License as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it would be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+#
+# Further, this software is distributed without any warranty that it is
+# free of the rightful claim of any third person regarding infringement
+# or the like.  Any license provided herein, whether implied or
+# otherwise, applies only to this software file.  Patent licenses, if
+# any, provided herein do not apply to combinations of this program with
+# other software, or any other product whatsoever.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write the Free Software Foundation,
+# Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
+#
+
+#######################################################################
+# Initialization:
+. /etc/init.d/functions
+. ${OCF_ROOT}/resource.d/heartbeat/.ocf-shellfuncs
+OCF_RESKEY_config_default="/etc/mfs/mfsmaster.cfg"
+OCF_RESKEY_binary_default="/usr/sbin/mfsmaster"
+OCF_RESKEY_metalog_path_default="/var/lib/mfsmetalogger"
+: ${OCF_RESKEY_config=${OCF_RESKEY_config_default}}
+: ${OCF_RESKEY_binary=${OCF_RESKEY_binary_default}}
+: ${OCF_RESKEY_metalog_path=${OCF_RESKEY_metalog_path_default}}
+
+#######################################################################
+
+mfs_meta_data() {
+	cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="mfsmaster" version="1.0">
+<version>1.0</version>
+
+<longdesc lang="en">
+This is a Resource Agent for MooseFS. It checks if mfsmaster are propertly
+configured, check service health if it is running.
+
+To ensure HA it's advisable to configure another resource as (VIP), and make
+a group with it.
+</longdesc>
+<shortdesc lang="en">MooseFS stateless resource agent</shortdesc>
+
+<parameters>
+<parameter name="config" required="0" unique="1">
+<longdesc lang="en">
+Full path to mfsmaster configuration file
+</longdesc>
+<shortdesc lang="en">mfsmaster configuration file</shortdesc>
+<content type="string" default="/etc/mfs/mfsmaster.cfg" />
+</parameter>
+
+<parameter name="meta_path" required="1" unique="1">
+<longdesc lang="en">
+Full path to root directory where are stored metadata used by metalogger and master.
+</longdesc>
+<shortdesc lang="en">Metadata directory path</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="binary" required="0" unique="1">
+<longdesc lang="en">
+Full path to mfsmaster server.
+</longdesc>
+<shortdesc lang="en">mfsmaster server command</shortdesc>
+<content type="string" default="/usr/sbin/mfsmaster" />
+</parameter>
+
+<parameter name="metalogger_server" required="0" unique="1">
+<longdesc lang="en">
+Server running metalogger. It's required an ssh paswordless connection.
+</longdesc>
+<shortdesc land="en">metalogger server</shortdesc>
+<content type="string" default="none" />
+</parameter>
+
+<parameter name="metalog_path" required="0" unique="1">
+<longdesc lang="en">
+Path to metalog files in metalogger server.
+</longdesc>
+<shortdesc lang="en">Path to metelog dir in metalogger</shortdesc>
+<content type="string" default="/var/lib/mfsmetalogger" />
+</parameter>
+</parameters>
+
+<actions>
+<action name="start"        timeout="20" />
+<action name="stop"         timeout="20" />
+<action name="monitor"      timeout="20" interval="10" depth="0"/>
+<action name="reload"       timeout="20" />
+<action name="migrate_to"   timeout="20" />
+<action name="migrate_from" timeout="20" />
+<action name="validate-all" timeout="20" />
+<action name="meta-data"    timeout="5" />
+</actions>
+</resource-agent>
+END
+}
+
+#######################################################################
+
+# don't exit on TERM, to test that lrmd makes sure that we do exit
+trap sigterm_handler TERM
+sigterm_handler() {
+	ocf_log info "They use TERM to bring us down. No such luck."
+	return
+}
+
+mfs_usage() {
+	cat <<END
+usage: $0 {start|stop|monitor|migrate_to|migrate_from|validate-all|meta-data}
+
+Expects to have a fully populated OCF RA-compliant environment set.
+END
+}
+
+mfs_start() {
+    mfs_monitor
+    RETVAL=$?
+    #if [ $rc = $OCF_ERR_GENERIC ] ; then
+    #    if [ -f $OCF_RESKEY_meta_path/.mfsmaster.lock ] ; then	
+    #	    rm -f $OCF_RESKEY_meta_path/.mfsmaster.lock
+    #	fi
+    #fi
+    if [ $RETVAL = $OCF_NOT_RUNNING ]; then
+	if [ -e $OCF_RESKEY_meta_path/metadata.mfs ]; then
+	    mfs_start_mfsmaster
+	    RETVAL=$?
+	    [ $RETVAL -eq $OCF_SUCCESS ] && return $OCF_SUCESS
+	fi
+	mfs_metarestore
+	RETVAL=$?
+	[ $RETVAL -ne $OCF_SUCCESS] && return $RETVAL	
+	return mfs_start_mfsmaster
+    else
+	return $RETVAL
+    fi
+}
+
+mfs_start_mfsmaster(){
+    ocf_run $OCF_RESKEY_binary -c $OCF_RESKEY_config start &> /dev/null
+    sleep 5
+    if [ ! `pidof mfsmaster` ] ; then
+	sleep 3
+	[ ! `pidof mfmaster` ] && return $OCF_ERR_GENERIC
+    fi
+    return $OCF_SUCCESS
+}
+
+mfs_metarestore(){
+    set -xv
+    # Creation of backup tar file before try to restore file.
+    # #1 create appropiate directory tree
+    rm -rf $OCF_RESKEY_meta_path/tmp
+    mkdir -p $OCF_RESKEY_meta_path/{bak,tmp}
+    chown mfs:mfs $OCF_RESKEY_meta_path/{bak,tmp}
+    # #2 Backing up restoration files.
+    cp $OCF_RESKEY_meta_path/*.mfs $OCF_RESKEY_meta_path/tmp/ &> /dev/null
+    cp $OCF_RESKEY_meta_path/*.mfs.back $OCF_RESKEY_meta_path/tmp/ &> /dev/null
+    # #3 Compressing and storing files
+    tar -czf $OCF_RESKEY_meta_path/bak/metabak.$(date +%Y%m%d%H%M%S).tar.gz $OCF_RESKEY_meta_path/tmp/* &>/dev/null
+    rm -rf $OCF_RESKEY_meta_path/tmp &>/dev/null
+    # #4 restore
+    mfsmetarestore -a -d $OCF_RESKEY_meta_path
+    if [ $? -eq 0 ] ; then
+        chown mfs:mfs $OCF_RESKEY_meta_path/metadata.mfs
+        return $OCF_SUCCESS
+    fi
+    # #5 trying to restore from metalogger
+    if [ ! -z "$OCF_RESKEY_metalogger_server" ] ; then 
+	rm -rf $OCF_RESKEY_metalog_path/tmp
+	mkdir -p $OCF_RESKEY_metalog_path/tmp
+	# #6 Stop and start metalogger service to prevent copying corrupted files
+	ssh $OCF_RESKEY_metalogger_server service mfsmetalogger stop
+	scp -rp $OCF_RESKEY_metalogger_server:$OCF_RESKEY_metalog_path/* $OCF_RESKEY_metalog_path/tmp
+	ssh $OCF_RESKEY_metalogger_server service mfsmetalogger start
+        mfsmetarestore -a -d $OCF_RESKEY_metalog_path/tmp
+        [ $? -ne 0 ] && return $OCF_ERR_GENERIC
+        cp $OCF_RESKEY_metalog_path/tmp/metadata.mfs $OCF_RESKEY_meta_path/metadata.mfs
+	rm -rf $OCF_RESKEY_metalog_path/tmp
+        chown mfs:mfs $OCF_RESKEY_meta_path/metadata.mfs
+        return $OCF_SUCCESS
+    else
+	return $OCF_ERR_GENERIC
+    fi
+}
+
+mfs_stop() {
+    mfs_monitor
+    if [ $? =  $OCF_SUCCESS ]; then
+	pid=`pidof mfsmaster`
+	ocf_run $OCF_RESKEY_binary stop &> /dev/null
+	[ $? -eq 0 ] && rm $OCF_RESKEY_meta_path/.mfsmaster.lock
+	shutdown_timeout=15
+	if [ -n "$OCF_RESKEY_CRM_meta_timeout" ]; then
+	    shutdown_timeout=$((($OCF_RESKEY_CRM_meta_timeout/1000)-5))
+	fi
+	count=0
+	while [ $count -lt $shutdown_timeout ]
+	do
+            mfs_monitor
+	    rc=$?
+	    if [ $rc = $OCF_NOT_RUNNING ]; then
+                break
+            fi
+            count=`expr $count + 1`
+            sleep 1
+            ocf_log debug "mfsmaster still hasn't stopped yet. Waiting..."
+        done
+	mfs_monitor
+	rc=$?
+	if [ $rc != $OCF_NOT_RUNNING ]; then
+            ocf_log info "mfsmaster failed to stop after ${shutdown_timeout}s using SIGTERM. Trying SIGKILL..."
+            /bin/kill -KILL $pid > /dev/null
+        fi
+
+    fi
+    mfs_monitor
+    rc=$?
+    if [ $rc -eq $OCF_NOT_RUNNING ]; then
+        rm -f $OCF_RESKEY_meta_path/.mfsmaster.lock
+	return $OCF_SUCCESS
+    else
+	pid=`lsof -i :9419 -Fp | cut -c2-`
+	if [ ! -z $pid ];then
+	    /bin/kill -KILL $pid > /dev/null
+	fi
+	mfs_monitor
+	rc=$?
+	if [ $rc = $OCF_NOT_RUNNING ]; then
+	    rm -f $OCF_RESKEY_meta_path/.mfsmaster.lock
+	    return $OCF_SUCCESS
+	else
+	    ocf_log err "mfsmaster couldn't be stopped"
+	    return $OCF_ERROR_GENERIC
+        fi
+    fi
+}
+
+mfs_monitor() {
+    # Monitor _MUST!_ differentiate correctly between running
+    # (SUCCESS), failed (ERROR) or _cleanly_ stopped (NOT RUNNING).
+    # That is THREE states, not just yes/no.
+    lsof -i :9419 > /dev/null
+    LISTENING=$?
+    pidof mfsmaster > /dev/null
+    rc=$?
+    if [ $rc -eq 0 ] && [ $LISTENING -eq 0 ]; then
+	return $OCF_SUCCESS
+    elif [ $rc -eq 0 ] && [ $LISTENING -ne 0 ]; then
+	return $OCF_ERR_GENERIC
+    elif [ $rc -ne 0 ] && [ $LISTENING -eq 0 ]; then
+	return $OCF_ERR_GENERIC
+    fi
+    [ -f $OCF_RESKEY_meta_path/.mfsmaster.lock ] && rm -f $OCF_RESKEY_meta_path/.mfsmaster.lock
+    return $OCF_NOT_RUNNING
+}		
+
+#Should validate:
+# configuration files exists
+# metadata path
+# 
+mfs_validate() {
+  if [ -f $OCF_RESKEY_config ]; then
+    EXPORTS_FILENAME=`grep "EXPORTS_FILENAME" $OCF_RESKEY_config | cut -d '=' -f2`
+    DATA_PATH=`grep "DATA_PATH" $OCF_RESKEY_config | cut -d '=' -f2`
+    WORKING_GROUP=`grep "WORKING_GROUP" $OCF_RESKEY_config | cut -d '=' -f2`
+    WORKING_USER=`grep "WORKING_USER" $OCF_RESKEY_config | cut -d '=' -f2`
+    [ ! -f $EXPORTS_FILENAME ] && return $OCF_ERR_ARGS
+    [ ! -d $DATA_PATH ] && return $OCF_ERR_ARGS  
+  fi  
+  return $OCF_SUCCESS
+}
+
+: ${OCF_RESKEY_CRM_meta_interval=0}
+: ${OCF_RESKEY_CRM_meta_globally_unique:="true"}
+
+
+if [ "x$OCF_RESKEY_state" = "x" ]; then
+    if [ ${OCF_RESKEY_CRM_meta_globally_unique} = "false" ]; then
+	state="${HA_VARRUN}/mfsmaster-${OCF_RESOURCE_INSTANCE}.state"
+	
+	# Strip off the trailing clone marker
+	OCF_RESKEY_state=`echo $state | sed s/:[0-9][0-9]*\.state/.state/`
+    else 
+	OCF_RESKEY_state="${HA_VARRUN}/mfsmaster-${OCF_RESOURCE_INSTANCE}.state"
+    fi
+fi
+
+case $__OCF_ACTION in
+meta-data)	mfs_meta_data
+		exit $OCF_SUCCESS
+		;;
+start)		mfs_start;;
+stop)		mfs_stop;;
+monitor)	mfs_monitor;;
+migrate_to)	ocf_log info "Migrating ${OCF_RESOURCE_INSTANCE} to ${OCF_RESKEY_CRM_meta_migrate_target}."
+	        stop
+		;;
+migrate_from)	ocf_log info "Migrating ${OCF_RESOURCE_INSTANCE} to ${OCF_RESKEY_CRM_meta_migrate_source}."
+	        start
+		;;
+reload)		ocf_log err "Reloading..."
+		mfs_stop
+	        mfs_start
+		;;
+validate-all)	mfs_validate;;
+usage|help)	mfs_usage
+		exit $OCF_SUCCESS
+		;;
+*)		mfs_usage
+		exit $OCF_ERR_UNIMPLEMENTED
+		;;
+esac
+rc=$?
+ocf_log debug "${OCF_RESOURCE_INSTANCE} $__OCF_ACTION : $rc"
+exit $rc
+
