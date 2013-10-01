@@ -1,2 +1,2 @@
-pacemaker-agent-moosefs
-=======================
+pacemaker-agents
+================
