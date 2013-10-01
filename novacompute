@@ -91,7 +91,7 @@ compute_start() {
     compute_monitor
     RETVAL=$?
     if [ $RETVAL =  $OCF_NOT_RUNNING ]; then
-	ssh ${OCF_RESKEY_host} 'service openstack-nova-compute start' &>/dev/null
+	timeout 20 ssh ${OCF_RESKEY_host} 'service openstack-nova-compute start' &>/dev/null
 	[ $? -ne 0 ] && return ${OCF_ERR_GENERIC}
         touch ${OCF_RESKEY_state}
 	return $OCF_SUCCESS
@@ -103,9 +103,10 @@ compute_stop() {
     compute_monitor
     RETVAL=$?
     if [ $RETVAL =  $OCF_SUCCESS ]; then
-        ssh $OCF_RESKEY_host 'service openstack-nova-compute stop' &>/dev/null
-	rm ${OCF_RESKEY_state}
-	[ $? -ne 0 ] && return ${OCF_ERR_GENERIC}
+        timeout 20 ssh $OCF_RESKEY_host 'service openstack-nova-compute stop' &>/dev/null
+	RETVAL=$?
+	rm ${OCF_RESKEY_state} &>/dev/null
+	[ $RETVAL -ne 0 ] && return ${OCF_ERR_GENERIC}
     fi
     return $OCF_SUCCESS
 }
